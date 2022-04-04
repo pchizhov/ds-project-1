@@ -22,7 +22,6 @@ class State(Enum):
 class Process:
 
     def __init__(self, pid: int, port: int, other_ports: set):
-        super().__init__()
         self.pid = pid
         self.port = port
         self.state = State.DO_NOT_WANT
@@ -35,39 +34,55 @@ class Process:
         self.init_socket(port)
 
     def init_socket(self, port: int):
+        """
+        Init input socket and listen on it
+        """
         self.socket.bind((LOCALHOST, port))
         self.socket.listen()
 
-    def stop(self):
-        self.terminated.set()
-
     @staticmethod
     def tp_timeout():
+        """
+        Calculate random waiting timeout
+        """
         return np.random.randint(5, TP + 1)
 
     @staticmethod
     def tcs_timeout():
+        """
+        Calculate random CS possession timeout
+        """
         return np.random.randint(10, TCS + 1)
 
     @staticmethod
     def decode_request(data: bytes):
+        """
+        Decode incoming request
+        """
         pid, t = data.decode().strip().split(' ')
         return int(pid), int(t)
 
     @staticmethod
     def ok_response():
+        """
+        OK response
+        """
         return 'OK'.encode()
 
     def to_queue(self, pid, t):
         """
         In lecture 6 it was not defined what to do when the timestamps match,
         therefore I added a rule, that in such case a process with lower
-        id wins.
+        id wins. Otherwise it would create a deadlock.
+        Source: http://www2.imm.dtu.dk/courses/02222/Spring_2011/W9L2/Chapter_12a.pdf (slide 36).
         """
-        return t > self.sent_timestamp or t == self.sent_timestamp and pid > self.pid
+        return (t, pid) > (self.sent_timestamp, self.pid)
 
     @staticmethod
     def send_to_process(address: tuple, message: str):
+        """
+        Connect to other process, send a message and wait for reply
+        """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(address)
         sock.send(message.encode())
@@ -75,6 +90,9 @@ class Process:
         return result == "OK"
 
     def broadcast_and_wait(self, message):
+        """
+        Broadcast a message to other processes and wait for reply
+        """
         sent_threads = []
         for address in self.others:
             new_thread = threading.Thread(target=self.send_to_process, args=(address, message))
@@ -84,14 +102,18 @@ class Process:
             thread.join()
 
     def possess(self):
+        """
+        Hold the critical section and release
+        """
         self.state = State.HELD
         time.sleep(self.tcs_timeout())
         self.state = State.DO_NOT_WANT
-        while not self.queue.empty():
-            flag = self.queue.get()
-            flag.set()
 
-    def apply_for_cs(self):
+    def handle_critical_section(self):
+        """
+        Apply for critical section when it's time, possess it and notify
+        queued processes in a loop
+        """
         while not self.terminated.is_set():
             time.sleep(self.tp_timeout())
             self.timestamp += 1
@@ -100,8 +122,15 @@ class Process:
             self.state = State.WANTED
             self.broadcast_and_wait(message)
             self.possess()
+            while not self.queue.empty():
+                flag = self.queue.get()
+                flag.set()
 
     def handle_connection(self, conn):
+        """
+        Handle new connection: reply OK on the conditions of
+        Ricart-Agrawala algorithm
+        """
         pid, t = self.decode_request(conn.recv(1024))
         self.timestamp = max(t, self.timestamp) + 1
         if self.state == State.HELD or self.state == State.WANTED and self.to_queue(pid, t):
@@ -112,14 +141,26 @@ class Process:
         conn.close()
 
     def start(self):
-        _thread.start_new_thread(self.apply_for_cs, ())
+        """
+        Process starting point, initiates all the processes
+        """
+        _thread.start_new_thread(self.handle_critical_section, ())
         while not self.terminated.is_set():
             conn, _ = self.socket.accept()
             _thread.start_new_thread(self.handle_connection, (conn,))
         self.socket.close()
 
+    def stop(self):
+        """
+        Raises termination flag
+        """
+        self.terminated.set()
+
 
 def init_processes(n: int):
+    """
+    Creates n processes, assigning them to ports [20001:20000+N]
+    """
     ports = {FIRST_PORT + i for i in range(n)}
     return [Process(i+1, FIRST_PORT+i, ports - {FIRST_PORT+i}) for i in range(n)]
 
